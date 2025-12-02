@@ -9,6 +9,3 @@
 #include <string>
 
 
-
-/// thread_oprea
-
