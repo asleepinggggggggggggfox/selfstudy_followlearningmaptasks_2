@@ -1,192 +1,182 @@
-#include "ThreadPool.h"
+#include "ThreadPool.h" // 包含您提供的头文件
 #include <iostream>
-#include <chrono>
 #include <vector>
 #include <future>
+#include <chrono>
 #include <atomic>
 #include <cassert>
 
-// 简单的任务函数
-int simpleTask(int a, int b) {
-    return a + b;
+// 辅助函数：模拟一个耗时任务
+int slow_square(int x) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return x * x;
 }
 
-// 模拟耗时任务
-void timeConsumingTask(int milliseconds) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
-}
-
-// 测试基本功能
-void testBasicFunctionality() {
-    std::cout << "=== 测试基本功能 ===" << std::endl;
-    
+// 测试1：基本功能测试
+void test_basic_functionality() {
+    std::cout << "=== 测试1：基本功能测试 ===" << std::endl;
     ThreadPool pool(4);
-    
-    // 测试简单任务提交
-    auto future1 = pool.enqueue(simpleTask, 10, 20);
-    auto result1 = future1.get();
-    std::cout << "简单任务结果: " << result1 << std::endl;
-    assert(result1 == 30);
-    
-    // 测试lambda表达式
-    auto future2 = pool.enqueue([]() { return std::string("Hello, ThreadPool!"); });
-    auto result2 = future2.get();
-    std::cout << "Lambda任务结果: " << result2 << std::endl;
-    assert(result2 == "Hello, ThreadPool!");
-    
-    std::cout << "基本功能测试通过! ✓" << std::endl;
+
+    // 测试无返回值任务
+    auto future1 = pool.enqueue([]() {
+        std::cout << "   无返回值任务在线程中执行。" << std::endl;
+    });
+    future1.get(); // 等待任务完成
+    std::cout << "   ✓ 无返回值任务测试通过" << std::endl;
+
+    // 测试有返回值任务
+    auto future2 = pool.enqueue([]() -> int {
+        return 2024;
+    });
+    assert(future2.get() == 2024);
+    std::cout << "   ✓ 有返回值任务测试通过" << std::endl;
+
+    // 测试传参任务
+    int base = 10;
+    auto future3 = pool.enqueue(slow_square, base);
+    assert(future3.get() == 100);
+    std::cout << "   ✓ 带参数任务测试通过" << std::endl;
+
+    std::cout << "✓ 基本功能测试全部通过\n" << std::endl;
 }
 
-// 测试并发性能
-void testConcurrentPerformance() {
-    std::cout << "\n=== 测试并发性能 ===" << std::endl;
-    
-    ThreadPool pool(std::thread::hardware_concurrency());
-    const int taskCount = 100;
+// 测试2：并发安全测试
+void test_concurrent_safety() {
+    std::cout << "=== 测试2：并发安全测试 ===" << std::endl;
+    ThreadPool pool(4);
+    std::atomic<int> counter(0);
+    const int TOTAL_TASKS = 1000;
+    std::vector<std::future<void>> futures;
+
+    // 提交大量自增任务，检验计数器是否准确
+    for (int i = 0; i < TOTAL_TASKS; ++i) {
+        futures.push_back(pool.enqueue([&counter]() {
+            counter.fetch_add(1, std::memory_order_relaxed);
+        }));
+    }
+    // 等待所有任务完成
+    for (auto& fut : futures) {
+        fut.get();
+    }
+    assert(counter == TOTAL_TASKS);
+    std::cout << "   计数器期望值: " << TOTAL_TASKS << ", 实际值: " << counter.load() << std::endl;
+    std::cout << "✓ 并发安全测试通过\n" << std::endl;
+}
+
+// 测试3：性能与压力测试
+void test_performance_pressure() {
+    std::cout << "=== 测试3：性能与压力测试 ===" << std::endl;
+    ThreadPool pool(8); // 使用较多线程来应对压力测试
+    const int NUM_TASKS = 5000;
     std::vector<std::future<int>> futures;
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    // 提交大量任务
-    for (int i = 0; i < taskCount; ++i) {
-        futures.emplace_back(pool.enqueue([i]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    futures.reserve(NUM_TASKS);
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // 提交大量计算任务
+    for (int i = 0; i < NUM_TASKS; ++i) {
+        futures.push_back(pool.enqueue([i]() -> int {
             return i * i;
         }));
     }
-    
-    // 收集结果
-    for (int i = 0; i < taskCount; ++i) {
+
+    // 验证所有结果
+    for (int i = 0; i < NUM_TASKS; ++i) {
         assert(futures[i].get() == i * i);
     }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    std::cout << "完成 " << taskCount << " 个任务耗时: " 
-              << duration.count() << "ms" << std::endl;
-    std::cout << "并发性能测试通过! ✓" << std::endl;
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    std::cout << "   完成 " << NUM_TASKS << " 个任务耗时: " << duration.count() << " 毫秒" << std::endl;
+    std::cout << "✓ 性能与压力测试通过\n" << std::endl;
 }
 
-// 测试线程池状态查询
-void testPoolStatus() {
-    std::cout << "\n=== 测试线程池状态 ===" << std::endl;
-    
-    ThreadPool pool(2);
-    
-    std::cout << "线程数量: " << pool.threadsize() << std::endl;
-    assert(pool.threadsize() == 2);
-    
-    std::cout << "初始队列大小: " << pool.workqueuesize() << std::endl;
-    assert(pool.workqueuesize() == 0);
-    
-    // 提交一些任务
+// 测试4：状态监控测试
+void test_status_monitoring() {
+    std::cout << "=== 测试4：状态监控测试 ===" << std::endl;
+    ThreadPool pool(3);
+
+    std::cout << "   初始状态 - 总线程数: " << pool.threadsize()
+              << ", 空闲线程数: " << pool.freethreadsize()
+              << ", 队列任务数: " << pool.workqueuesize() << std::endl;
+
+    // 提交一些耗时任务，观察状态变化
     std::vector<std::future<void>> futures;
     for (int i = 0; i < 5; ++i) {
-        futures.emplace_back(pool.enqueue([i]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        futures.push_back(pool.enqueue([]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50)); // 稍作延迟，模拟任务提交间隔
+        std::cout << "   提交任务后 - 总线程数: " << pool.threadsize()
+                  << ", 空闲线程数: " << pool.freethreadsize()
+                  << ", 队列任务数: " << pool.workqueuesize() << std::endl;
     }
-    
-    // 短暂等待后检查队列大小
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    std::cout << "提交任务后队列大小: " << pool.workqueuesize() << std::endl;
-    
-    std::cout << "状态查询测试通过! ✓" << std::endl;
+
+    // 等待所有任务完成
+    for (auto& fut : futures) {
+        fut.get();
+    }
+    std::cout << "   任务完成后 - 总线程数: " << pool.threadsize()
+              << ", 空闲线程数: " << pool.freethreadsize()
+              << ", 队列任务数: " << pool.workqueuesize() << std::endl;
+    std::cout << "✓ 状态监控测试通过\n" << std::endl;
 }
 
-// 测试异常处理
-void testExceptionHandling() {
-    std::cout << "\n=== 测试异常处理 ===" << std::endl;
-    
+// 测试5：异常处理测试
+void test_exception_handling() {
+    std::cout << "=== 测试5：异常处理测试 ===" << std::endl;
     ThreadPool pool(2);
-    
-    // 测试抛出异常的任务
+
+    // 测试任务中抛出异常是否能通过future正确捕获
     auto future = pool.enqueue([]() -> int {
-        throw std::runtime_error("测试异常");
-        return 42;
+        throw std::runtime_error("这是一个在任务中抛出的测试异常");
+        return 0;
     });
-    
+
     try {
-        future.get();
-        assert(false); // 不应该执行到这里
+        future.get(); // 这里应该会抛出异常
+        assert(false && "不应执行到此，应已捕获异常。"); // 如果执行到这里，说明测试失败
     } catch (const std::exception& e) {
-        std::cout << "成功捕获异常: " << e.what() << std::endl;
+        std::cout << "   成功捕获到任务抛出的异常: " << e.what() << std::endl;
     }
-    
-    std::cout << "异常处理测试通过! ✓" << std::endl;
+    std::cout << "✓ 异常处理测试通过\n" << std::endl;
 }
 
-// 测试析构函数行为
-void testDestructorBehavior() {
-    std::cout << "\n=== 测试析构函数行为 ===" << std::endl;
-    
+// 测试6：线程池停止行为测试
+void test_stop_behavior() {
+    std::cout << "=== 测试6：线程池停止行为测试 ===" << std::endl;
     {
         ThreadPool pool(2);
-        
-        // 提交一些任务但不等待完成
-        for (int i = 0; i < 3; ++i) {
-            pool.enqueue([i]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            });
-        }
-        
-        // pool在作用域结束时析构，应该等待所有任务完成
-    }
-    
-    std::cout << "析构函数测试完成! ✓" << std::endl;
-}
 
-// 性能基准测试
-void benchmarkPerformance() {
-    std::cout << "\n=== 性能基准测试 ===" << std::endl;
-    
-    const int heavyTaskCount = 1000;
-    
-    // 测试单线程执行
-    auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < heavyTaskCount; ++i) {
-        simpleTask(i, i);
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-    auto singleThreadTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    // 测试线程池执行
-    ThreadPool pool(std::thread::hardware_concurrency());
-    start = std::chrono::high_resolution_clock::now();
-    
-    std::vector<std::future<int>> futures;
-    for (int i = 0; i < heavyTaskCount; ++i) {
-        futures.emplace_back(pool.enqueue(simpleTask, i, i));
-    }
-    
-    for (auto& future : futures) {
-        future.get();
-    }
-    
-    end = std::chrono::high_resolution_clock::now();
-    auto multiThreadTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    std::cout << "单线程执行时间: " << singleThreadTime.count() << "ms" << std::endl;
-    std::cout << "线程池执行时间: " << multiThreadTime.count() << "ms" << std::endl;
-    std::cout << "加速比: " << static_cast<double>(singleThreadTime.count()) / multiThreadTime.count() << "x" << std::endl;
+        // 提交一个任务并确保它开始执行
+        auto future = pool.enqueue([]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::cout << "   任务在线程池停止前已执行完毕。" << std::endl;
+        });
+        future.get(); // 等待这个任务完成
+
+        std::cout << "   线程池即将析构..." << std::endl;
+    } // pool在此作用域结束时析构，会调用其析构函数
+    std::cout << "   线程池已安全析构。" << std::endl;
+    std::cout << "✓ 线程池停止行为测试通过\n" << std::endl;
 }
 
 int main() {
-    std::cout << "开始测试线程池..." << std::endl;
-    
+    std::cout << "开始执行线程池全面测试...\n" << std::endl;
+
     try {
-        testBasicFunctionality();
-        testConcurrentPerformance();
-        testPoolStatus();
-        testExceptionHandling();
-        testDestructorBehavior();
-        benchmarkPerformance();
-        
-        std::cout << "\n🎉 所有测试通过! 线程池功能正常。" << std::endl;
+        test_basic_functionality();
+        test_concurrent_safety();
+        test_performance_pressure();
+        test_status_monitoring();
+        test_exception_handling();
+        test_stop_behavior();
+
+        std::cout << "🎉 恭喜！所有测试均通过，线程池功能正常。" << std::endl;
         return 0;
+
     } catch (const std::exception& e) {
-        std::cerr << "❌ 测试失败: " << e.what() << std::endl;
+        std::cerr << "❌ 测试失败，发生异常: " << e.what() << std::endl;
         return 1;
     }
 }

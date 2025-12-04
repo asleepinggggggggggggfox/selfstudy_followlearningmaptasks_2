@@ -11,6 +11,7 @@
 #include <atomic>
 #include <string>
 
+
 class ThreadPool{
     public:
     ThreadPool(size_t numofthread);
@@ -31,7 +32,7 @@ class ThreadPool{
         {
             std::unique_lock<std::mutex> lock(queuemutex);
 
-            if(stop){
+            if(stopsign){
                 throw std::runtime_error("enqueue on stopped ThreadPool");
             }
             workqueue.emplace([task](){(*task)();}); //存入lamda表达式 工作线程进行调用
@@ -42,16 +43,21 @@ class ThreadPool{
         return result;
     }
 
+    void stop();
+
+
     size_t threadsize() const;
     size_t workqueuesize() const;
+    size_t freethreadsize() const;
 
     private:
     std::vector<std::thread> workers;   //工作线程
     std::queue<std::function<void()>> workqueue;    //任务队列
+    std::atomic<size_t> free_counter{0};      //线程安全的原子计数器
 
     mutable std::mutex queuemutex;
     std::condition_variable condition;
-    std::atomic<bool> stop; //停止标志 用于析构
+    std::atomic<bool> stopsign; //停止标志 用于析构
 };
 
 
