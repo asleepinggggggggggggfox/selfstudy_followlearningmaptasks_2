@@ -82,3 +82,30 @@ void ThreadPool::stop(){
         }
     }
 }
+
+void ThreadPool::revise(size_t num){
+    std::unique_lock<std::mutex> lock(queuemutex);
+
+    std::queue<std::function<void()>> temp_q;
+    std::swap(temp_q,workqueue);
+    int currentsize = workers.size();
+
+    if(num>currentsize){
+        for(int i = currentsize; i<num; i++){
+            workers.emplace_back([this]{
+                this->workerThread();
+            });
+        }
+    }
+    else if(num<currentsize){
+        stopsign = true;
+        int difference = currentsize - num;
+        
+        
+
+    }
+
+
+    
+
+}
