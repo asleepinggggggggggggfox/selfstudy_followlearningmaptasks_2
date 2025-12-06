@@ -7,7 +7,7 @@
 #include <future>
 #include <atomic>
 #include <string>
-
+#include <iostream>
 #include "ThreadPool.h"
 
 
@@ -16,6 +16,8 @@ ThreadPool::ThreadPool(size_t numofthread):stopsign(false){
         workers.emplace_back([this]{
             this->workerThread();
         });
+        
+
     }
 }
 
@@ -51,8 +53,15 @@ void ThreadPool::workerThread(){
             }
 
         }
-        task();
         free_counter--;
+        if(task){
+            task();
+        }
+        else{
+            return;
+        }
+        
+        
     }
 }
 
@@ -83,29 +92,41 @@ void ThreadPool::stop(){
     }
 }
 
-void ThreadPool::revise(size_t num){
+void ThreadPool::revise(size_t num) {
+    if (num == 0) return;
+
     std::unique_lock<std::mutex> lock(queuemutex);
-
-    std::queue<std::function<void()>> temp_q;
-    std::swap(temp_q,workqueue);
-    int currentsize = workers.size();
-
-    if(num>currentsize){
-        for(int i = currentsize; i<num; i++){
-            workers.emplace_back([this]{
-                this->workerThread();
+    size_t currentsize = workers.size();
+    
+    if (num == currentsize) return;
+    
+    std::cout << "Adjust the size of the thread pool: " << currentsize << " -> " << num << std::endl;
+    
+    if (num > currentsize) {
+        // 扩容逻辑：在锁保护下创建新线程
+        for (size_t i = currentsize; i < num; i++) {
+            workers.emplace_back([this] {
+                workerThread();
             });
         }
+    } else {
+        // 缩容逻辑：安全地减少线程
+        stopsign = true; // 1. 设置停止标志，通知所有线程准备退出
     }
-    else if(num<currentsize){
-        stopsign = true;
-        int difference = currentsize - num;
-        
-        
+    lock.unlock(); // 释放锁，让线程可以执行退出逻辑
 
+    // 2. 通知所有线程，让它们检查停止条件
+    condition.notify_all();
+
+    // 3. 等待需要被移除的线程结束
+    size_t reduceCount = currentsize - num;
+    for (size_t i = 0; i < reduceCount; i++) {
+        if (workers.back().joinable()) {
+            workers.back().join(); // 等待线程结束
+        }
+        workers.pop_back(); // 从向量中移除线程对象
     }
 
-
-    
-
+    lock.lock();
+    stopsign = false;
 }

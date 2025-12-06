@@ -12,6 +12,17 @@
 #include <string>
 
 
+enum class ThreadStatus{
+    idle,
+    busy,
+    stopped
+};
+
+struct ThreadData{
+    std::atomic<ThreadStatus> status{ThreadStatus::idle};
+    std::thread::id threadId;
+};
+
 class ThreadPool{
     public:
     ThreadPool(size_t numofthread);
@@ -44,8 +55,8 @@ class ThreadPool{
     }
 
 
-    void revise(size_t num);
-
+    void revise(size_t num);    //修改线程数量
+    void markThreadAsIdle(std::thread::id tid);
     void stop();
 
 
@@ -53,20 +64,17 @@ class ThreadPool{
     size_t workqueuesize() const;
     size_t freethreadsize() const;
 
-    void appendtobusyworkers(std::thread* th);
-    void removebusyworkers(std::thread* th);
 
     private:
     std::vector<std::thread> workers;   //工作线程
     std::queue<std::function<void()>> workqueue;    //任务队列
     std::atomic<size_t> free_counter{0};      //线程安全的原子计数器
-    std::vector<std::thread*> busyworkers;
-    std::vector<std::thread*> freeworkers;
+
 
 
 
     mutable std::mutex queuemutex;
-    mutable std::mutex listmutex;
+    
 
     std::condition_variable condition;
     std::atomic<bool> stopsign; //停止标志 用于析构
