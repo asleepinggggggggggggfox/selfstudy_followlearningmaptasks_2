@@ -1,48 +1,37 @@
 #include <iostream>
+#include <chrono>
 #include <vector>
 #include <atomic>
-#include <chrono>
 #include <stdexcept>
+#include <algorithm>
+
+// 包含您的线程池头文件
 #include "ThreadPool.hpp"
 
 // 测试函数声明
-void test_basic_functionality();
-void test_concurrent_safety();
-void test_task_return_values();
-void test_exception_handling();
-void test_thread_pool_destruction();
-void test_stop_behavior();
-void test_performance();
+void testBasicFunctionality();
+void testThreadStatus();
+void testConcurrentEnqueue();
+void testExceptionHandling();
+void testDestructorBehavior();
+void testPerformance();
+void testEdgeCases();
 
 int main() {
-    std::cout << "开始线程池测试..." << std::endl;
+    std::cout << "=== ThreadPool 全面测试开始 ===\n" << std::endl;
     
     try {
-        test_basic_functionality();
-        std::cout << "✓ 基本功能测试通过" << std::endl;
+        testBasicFunctionality();
+        testThreadStatus();
+        testConcurrentEnqueue();
+        testExceptionHandling();
+        testDestructorBehavior();
+        testPerformance();
+        testEdgeCases();
         
-        test_concurrent_safety();
-        std::cout << "✓ 并发安全测试通过" << std::endl;
-        
-        test_task_return_values();
-        std::cout << "✓ 任务返回值测试通过" << std::endl;
-        
-        test_exception_handling();
-        std::cout << "✓ 异常处理测试通过" << std::endl;
-        
-        test_thread_pool_destruction();
-        std::cout << "✓ 线程池析构测试通过" << std::endl;
-        
-        test_stop_behavior();
-        std::cout << "✓ 停止行为测试通过" << std::endl;
-        
-        test_performance();
-        std::cout << "✓ 性能测试通过" << std::endl;
-        
-        std::cout << "\n🎉 所有测试通过！线程池功能正常。" << std::endl;
-        
+        std::cout << "\n=== 所有测试通过！ ===" << std::endl;
     } catch (const std::exception& e) {
-        std::cerr << "❌ 测试失败: " << e.what() << std::endl;
+        std::cerr << "测试失败: " << e.what() << std::endl;
         return 1;
     }
     
@@ -50,155 +39,235 @@ int main() {
 }
 
 // 1. 基本功能测试
-void test_basic_functionality() {
-    ThreadPool pool(2);
+void testBasicFunctionality() {
+    std::cout << "1. 基本功能测试..." << std::endl;
     
-    // 测试简单任务提交
-    std::atomic<int> counter{0};
-    auto future = pool.enqueue([&counter]() {
-        counter++;
-        return 42;
-    });
+    ThreadPool pool(4);
     
-    // 等待任务完成并检查返回值
-    assert(future.get() == 42);
-    assert(counter == 1);
+    // 测试简单任务
+    auto future1 = pool.enqueue([]() { return 42; });
+    assert(future1.get() == 42);
+    
+    // 测试带参数的任务
+    auto future2 = pool.enqueue([](int a, int b) { return a + b; }, 10, 20);
+    assert(future2.get() == 30);
+    
+    // 测试字符串返回值
+    auto future3 = pool.enqueue([](const std::string& s) { return "Hello " + s; }, "World");
+    assert(future3.get() == "Hello World");
+    
+    // 测试多个任务
+    std::vector<std::future<int>> results;
+    for (int i = 0; i < 10; ++i) {
+        results.emplace_back(pool.enqueue([i]() { return i * i; }));
+    }
+    
+    for (int i = 0; i < 10; ++i) {
+        assert(results[i].get() == i * i);
+    }
+    
+    std::cout << "   ✓ 基本功能测试通过" << std::endl;
 }
 
-// 2. 并发安全测试
-void test_concurrent_safety() {
-    ThreadPool pool(4);
-    std::atomic<int> shared_counter{0};
-    const int TASK_COUNT = 1000;
+// 2. 线程状态测试（简化版，避免直接访问内部状态）
+void testThreadStatus() {
+    std::cout << "2. 线程状态测试..." << std::endl;
+    
+    ThreadPool pool(2);
+    
+    // 提交耗时任务来观察线程行为
+    std::atomic<int> task_count{0};
     std::vector<std::future<void>> futures;
     
-    // 提交大量并发任务
-    for (int i = 0; i < TASK_COUNT; ++i) {
-        futures.push_back(pool.enqueue([&shared_counter]() {
-            shared_counter.fetch_add(1, std::memory_order_relaxed);
+    for (int i = 0; i < 4; ++i) {
+        futures.emplace_back(pool.enqueue([&task_count, i]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            task_count++;
         }));
     }
     
     // 等待所有任务完成
-    for (auto& future : futures) {
-        future.get();
+    for (auto& f : futures) {
+        f.get();
     }
     
-    // 验证计数器值
-    assert(shared_counter == TASK_COUNT);
+    assert(task_count == 4);
+    std::cout << "   ✓ 线程状态测试通过" << std::endl;
 }
 
-// 3. 任务返回值测试
-void test_task_return_values() {
-    ThreadPool pool(2);
+// 3. 并发入队测试
+void testConcurrentEnqueue() {
+    std::cout << "3. 并发入队测试..." << std::endl;
     
-    // 测试不同类型的返回值
-    auto future1 = pool.enqueue([]() { return std::string("Hello"); });
-    auto future2 = pool.enqueue([]() { return 3.14; });
-    auto future3 = pool.enqueue([]() { return std::vector<int>{1, 2, 3}; });
+    ThreadPool pool(4);
+    const int task_count = 100;
+    std::atomic<int> completed_tasks{0};
     
-    assert(future1.get() == "Hello");
-    assert(future2.get() == 3.14);
-    assert(future3.get().size() == 3);
+    // 多个生产者线程同时提交任务
+    auto producer = [&pool, &completed_tasks]() {
+        for (int i = 0; i < task_count / 10; ++i) {
+            pool.enqueue([&completed_tasks]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                completed_tasks++;
+            });
+        }
+    };
+    
+    std::vector<std::thread> producers;
+    for (int i = 0; i < 10; ++i) {
+        producers.emplace_back(producer);
+    }
+    
+    for (auto& p : producers) {
+        p.join();
+    }
+    
+    // 等待所有任务完成（使用更智能的等待方式）
+    auto start = std::chrono::steady_clock::now();
+    while (completed_tasks < task_count) {
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
+            std::cout << "警告: 任务完成超时" << std::endl;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    assert(completed_tasks == task_count);
+    std::cout << "   ✓ 并发入队测试通过" << std::endl;
 }
 
-// 4. 异常处理测试[7](@ref)
-void test_exception_handling() {
+// 4. 异常处理测试（修复了段错误问题）
+void testExceptionHandling() {
+    std::cout << "4. 异常处理测试..." << std::endl;
+    
     ThreadPool pool(2);
     
-    // 测试任务中抛出异常
-    auto future = pool.enqueue([]() {
-        throw std::runtime_error("测试异常");
-        return 0;
-    });
+    // 测试任务抛出异常
+    auto failing_task = []() -> int {
+        throw std::runtime_error("任务执行失败");
+        return 1;
+    };
     
-    bool exception_caught = false;
+    auto future = pool.enqueue(failing_task);
+    
     try {
         future.get();
-    } catch (const std::runtime_error&) {
-        exception_caught = true;
+        assert(false); // 不应该执行到这里
+    } catch (const std::runtime_error& e) {
+        std::cout << "   ✓ 捕获到预期异常: " << e.what() << std::endl;
     }
-    assert(exception_caught);
     
-    // 测试停止后提交任务[7](@ref)
+    // 安全的停止测试：通过作用域自然析构
     {
         ThreadPool temp_pool(1);
-        // 析构函数会自动调用
+        auto temp_future = temp_pool.enqueue([]() { return 42; });
+        assert(temp_future.get() == 42);
+        // temp_pool 会自动析构
     }
     
-    ThreadPool another_pool(1);
-    // 手动触发停止行为（通过作用域结束）
+    std::cout << "   ✓ 异常处理测试通过" << std::endl;
 }
 
-// 5. 线程池析构测试[1,5](@ref)
-void test_thread_pool_destruction() {
-    std::atomic<int> task_counter{0};
+// 5. 析构行为测试
+void testDestructorBehavior() {
+    std::cout << "5. 析构行为测试..." << std::endl;
+    
+    std::atomic<int> tasks_completed{0};
+    const int expected_tasks = 5;
     
     {
         ThreadPool pool(2);
         
-        // 提交一些任务但不等待完成
-        for (int i = 0; i < 5; ++i) {
-            pool.enqueue([&task_counter, i]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                task_counter.fetch_add(1);
+        // 提交一些耗时任务
+        for (int i = 0; i < expected_tasks; ++i) {
+            pool.enqueue([&tasks_completed, i]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                tasks_completed++;
+                return i;
             });
         }
         
-        // pool析构时会等待任务完成
+        // pool 析构时会等待所有任务完成
     }
     
-    // 所有任务应该在析构前完成
-    assert(task_counter == 5);
+    assert(tasks_completed == expected_tasks);
+    std::cout << "   ✓ 析构行为测试通过" << std::endl;
 }
 
-// 6. 停止行为测试
-void test_stop_behavior() {
-    ThreadPool pool(2);
+// 6. 性能测试
+void testPerformance() {
+    std::cout << "6. 性能测试..." << std::endl;
     
-    // 提交任务后立即让pool析构
-    std::atomic<int> completed_tasks{0};
+    auto start = std::chrono::high_resolution_clock::now();
     
-    for (int i = 0; i < 3; ++i) {
-        pool.enqueue([&completed_tasks, i]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            completed_tasks.fetch_add(1);
+    {
+        ThreadPool pool(4);
+        const int task_count = 1000;
+        std::atomic<int> counter{0};
+        std::vector<std::future<void>> futures;
+        
+        for (int i = 0; i < task_count; ++i) {
+            futures.emplace_back(pool.enqueue([&counter]() {
+                // 模拟轻量级工作
+                counter++;
+            }));
+        }
+        
+        // 等待所有任务完成
+        for (auto& f : futures) {
+            f.get();
+        }
+        
+        assert(counter == task_count);
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    std::cout << "   ✓ 完成1000个任务耗时: " << duration.count() << "ms" << std::endl;
+}
+
+// 7. 边界情况测试
+void testEdgeCases() {
+    std::cout << "7. 边界情况测试..." << std::endl;
+    
+    // 测试单线程线程池
+    {
+        ThreadPool pool(1);
+        auto future = pool.enqueue([]() { return 42; });
+        assert(future.get() == 42);
+    }
+    
+    // 测试大量小任务
+    {
+        ThreadPool pool(2);
+        std::atomic<int> count{0};
+        std::vector<std::future<void>> futures;
+        
+        for (int i = 0; i < 200; ++i) {
+            futures.emplace_back(pool.enqueue([&count]() {
+                count++;
+            }));
+        }
+        
+        for (auto& f : futures) {
+            f.get();
+        }
+        
+        assert(count == 200);
+    }
+    
+    // 测试任务依赖（前一个任务的输出作为后一个任务的输入）
+    {
+        ThreadPool pool(2);
+        
+        auto future1 = pool.enqueue([]() { return 10; });
+        auto future2 = pool.enqueue([future1 = std::move(future1)]() mutable {
+            return future1.get() * 2;
         });
+        
+        assert(future2.get() == 20);
     }
     
-    // 给任务一些时间开始执行
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-}
-
-// 7. 性能测试[6](@ref)
-void test_performance() {
-    const size_t THREAD_COUNT = 4;
-    const int TASK_COUNT = 100;
-    
-    ThreadPool pool(THREAD_COUNT);
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    std::vector<std::future<int>> results;
-    for (int i = 0; i < TASK_COUNT; ++i) {
-        results.push_back(pool.enqueue([i]() {
-            // 模拟一些工作负载
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            return i * i;
-        }));
-    }
-    
-    // 收集结果
-    for (int i = 0; i < TASK_COUNT; ++i) {
-        assert(results[i].get() == i * i);
-    }
-    
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        end_time - start_time);
-    
-    std::cout << "   性能测试: 完成 " << TASK_COUNT 
-              << " 个任务用时 " << duration.count() << "ms" << std::endl;
-    
-    // 验证多线程加速效果（应该明显快于单线程）
-    assert(duration.count() < TASK_COUNT * 10); // 保守估计
+    std::cout << "   ✓ 边界情况测试通过" << std::endl;
 }

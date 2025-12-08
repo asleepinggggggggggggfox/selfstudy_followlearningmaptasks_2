@@ -66,14 +66,28 @@ public:
         }
     }
     void workerThread(){
+        std::thread::id this_id = std::this_thread::get_id();
+        int index = -1;
+        for(size_t i = 0; i < threadTexts.size(); ++i){
+            if(threadTexts[i].threadId == this_id){
+                index = i;
+                break;
+            }
+        }
+        if(index == -1) {
+        std::cerr << "错误：工作线程未在线程列表中找到！" << std::endl;
+        return; // 安全退出
+    }
         while(true){
         std::function<void()> task;
+        threadTexts[index].status.store(ThreadStatus::idle);
         {
         std::unique_lock<std::mutex> lock(queuemutex);
         condition.wait(lock,[this]{
             return stopall || !workqueue.empty();
             });
         if(stopall && workqueue.empty()){
+            threadTexts[index].status.store(ThreadStatus::stopped);
             return;
             }
             if(!workqueue.empty()){
@@ -83,6 +97,7 @@ public:
 
         }
         if(task){
+            threadTexts[index].status.store(ThreadStatus::busy);
             task();
         }   
     }
@@ -121,11 +136,22 @@ public:
         }
     }
 
-    private:
-        std::vector<ThreadText> threadTexts;            //线程信息
-        std::queue<std::function<void()>> workqueue;    //任务队列
 
-        std::mutex queuemutex;                          //任务队列互斥锁
-        std::condition_variable condition;              //条件变量
-        std::atomic<bool> stopall;              //停止标志
+
+
+
+
+    size_t workqueuesize() const{
+    std::unique_lock<std::mutex> lock(queuemutex);
+    return workqueue.size();
+    }
+
+
+private:
+    std::vector<ThreadText> threadTexts;            //线程信息
+    std::queue<std::function<void()>> workqueue;    //任务队列
+
+    mutable std::mutex queuemutex;                          //任务队列互斥锁
+    std::condition_variable condition;              //条件变量
+    std::atomic<bool> stopall;              //停止标志
 };
