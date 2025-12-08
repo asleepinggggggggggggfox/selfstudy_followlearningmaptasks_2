@@ -1,39 +1,41 @@
-# 编译器选择
+# 编译器和标志
 CXX := g++
-
-# 编译选项
-CXXFLAGS := -std=c++11 -Wall -Wextra -O2 -pthread
-
-# 目标可执行文件名称
+# 使用C++11标准，启用常见警告，链接 pthread 库
+CXXFLAGS := -std=c++11 -Wall -Wextra -pthread
+# 可执行文件名称
 TARGET := test_threadpool
 
-# 源文件 (不包含头文件)
-SOURCES := TheadPool.cpp test_threadpool.cpp
+# 源文件：只需要您的测试文件
+SRCS := test_threadpool.cpp
+# 生成目标文件列表 (.o) 和依赖文件列表 (.d)
+OBJS := $(SRCS:.cpp=.o)
+DEPS := $(SRCS:.cpp=.d)
 
-# 生成对应的目标文件列表 (.o 文件)
-OBJECTS := $(SOURCES:.cpp=.o)
-
-# 头文件依赖 (根据 .h 文件自动生成，避免修改头文件后不重新编译的问题)
-HEADERS := ThreadPool.h
-
-# 默认目标：编译生成可执行文件
+# 默认目标
 all: $(TARGET)
 
 # 链接目标文件生成可执行文件
-$(TARGET): $(OBJECTS)
-	$(CXX) $(OBJECTS) -o $@ $(CXXFLAGS)
+$(TARGET): $(OBJS)
+	$(CXX) $(OBJS) -o $@ $(CXXFLAGS)
 
-# 编译每个 .cpp 文件为 .o 文件
-# 此行保证了每个 .o 文件依赖于对应的 .cpp 文件和 HEADERS 中列出的头文件
-%.o: %.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+# 编译源文件，并生成依赖信息。关键：-pthread 标志在编译阶段也需要
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+# 包含生成的依赖文件，确保头文件更新时能重新编译
+-include $(DEPS)
 
 # 清理编译生成的文件
 clean:
-	rm -f $(TARGET) $(OBJECTS)
+	rm -f $(TARGET) $(OBJS) $(DEPS)
 
-# 重新构建：先清理再编译
-rebuild: clean all
+# 声明伪目标
+.PHONY: all clean
 
-# 声明伪目标，防止与同名文件冲突
-.PHONY: all clean rebuild
+# 调试模式 (添加调试符号，关闭优化)
+debug: CXXFLAGS += -g -O0 -DDEBUG
+debug: clean $(TARGET)
+
+# 发布模式 (优化级别提高)
+release: CXXFLAGS += -O2 -DNDEBUG
+release: $(TARGET)
