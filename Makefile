@@ -1,7 +1,7 @@
 # 编译器和标志
 CXX := g++
-# 使用C++11标准，启用常见警告，链接 pthread 库
-CXXFLAGS := -std=c++11 -Wall -Wextra -pthread
+
+CXXFLAGS = -std=c++11 -Wall -Wextra -pthread -MMD -MP
 # 可执行文件名称
 TARGET := test_threadpool
 

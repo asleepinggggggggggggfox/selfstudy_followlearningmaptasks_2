@@ -145,13 +145,26 @@ public:
     std::unique_lock<std::mutex> lock(queuemutex);
     return workqueue.size();
     }
+    size_t aliveThreadCount() const{
+        size_t count = 0;
+        for(const auto& threadText : threadTexts){
+            ThreadStatus status = threadText.status.load();
+            if(status != ThreadStatus::stopped){
+                count++;
+            }
+        }
+        return count;
+    }
+
+
+
 
 
 private:
     std::vector<ThreadText> threadTexts;            //线程信息
     std::queue<std::function<void()>> workqueue;    //任务队列
 
-    mutable std::mutex queuemutex;                          //任务队列互斥锁
+    mutable std::mutex queuemutex;                  //任务队列互斥锁
     std::condition_variable condition;              //条件变量
     std::atomic<bool> stopall;              //停止标志
 };
