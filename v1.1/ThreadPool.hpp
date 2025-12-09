@@ -1,4 +1,4 @@
-// ThreadPool.hpp
+// ThreadPool_Fixed.hpp
 #pragma once
 
 #include <vector>
@@ -17,12 +17,9 @@
 class ThreadPool {
 public:
     explicit ThreadPool(size_t min_threads = std::thread::hardware_concurrency(),
-                       size_t max_threads = std::thread::hardware_concurrency() * 2,
-                       std::chrono::milliseconds min_stable_time = std::chrono::seconds(5)) // 默认冷却期5秒
-        : shutdown_(false), min_threads_(min_threads), max_threads_(max_threads), 
-          min_stable_time_(min_stable_time) // 初始化最短稳定时间
+                       size_t max_threads = std::thread::hardware_concurrency() * 2)
+        : shutdown_(false), min_threads_(min_threads), max_threads_(max_threads) 
     {
-        last_scale_time_ = std::chrono::steady_clock::now() - min_stable_time_; // 初始化时设置为"允许操作"
         // 先创建所有线程，但不立即启动工作循环
         for (size_t i = 0; i < min_threads_; ++i) {
             workers_.emplace_back([this]() { 
@@ -87,6 +84,12 @@ public:
         return idle_count_.load();
     }
 
+    void wait_all() {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        completion_condition_.wait(lock, [this]() {
+            return tasks_.empty() && (idle_count_ == workers_.size());
+        });
+    }
 
     ~ThreadPool() {
         {
@@ -94,6 +97,7 @@ public:
             shutdown_ = true;
         }
         condition_.notify_all();
+        completion_condition_.notify_all();
         
         for (auto &worker : workers_) {
             if (worker.joinable()) {
@@ -109,96 +113,59 @@ private:
     std::queue<std::function<void()>> tasks_;
     mutable std::mutex queue_mutex_;
     std::condition_variable condition_;
+    std::condition_variable completion_condition_;
     std::atomic<size_t> idle_count_{0};
     size_t min_threads_;
     size_t max_threads_;
-    std::chrono::steady_clock::time_point last_scale_time_; // 最后一次扩缩容时间
-    std::chrono::milliseconds min_stable_time_;            // 最短稳定时间（冷却期）
-    std::vector<std::thread::id> threads_to_retire_;     // 待退休线程ID列表
 
-void worker_loop() {
-    auto my_id = std::this_thread::get_id();
-    while (true) {
-        std::function<void()> task;
-        bool should_exit = false;
+    void worker_loop() {
+        auto my_id = std::this_thread::get_id();
+        
+        while (true) {
+            std::function<void()> task;
+            bool should_exit = false;
 
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            idle_count_++;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                idle_count_++;
 
-            condition_.wait(lock, [this, my_id]() {
-                return shutdown_ || !tasks_.empty() || should_retire(my_id);
-            });
-
-            
-            if (shutdown_ && tasks_.empty()) {
-                idle_count_--;
-                should_exit = true;
-            } else if (should_retire(my_id)) {
-                threads_to_retire_.erase(std::remove(threads_to_retire_.begin(), threads_to_retire_.end(), my_id), threads_to_retire_.end());
-                idle_count_--;
-                should_exit = true;
-                std::cout << "Thread " << my_id << " is retiring as requested.\n";
-            } else if (!tasks_.empty()) {
-                task = std::move(tasks_.front());
-                tasks_.pop();
-                idle_count_--;
-            }
-            // 如果是虚假唤醒，则继续循环
-        } // 锁作用域结束
-
-        if (should_exit) {
-            break;
-        }
-
-        if (task) {
-            // 执行任务
-            task();
-        }
-    }
-    // 线程自然结束
-}
-    
-
-void check_and_scale_down_simple() {
-    std::thread::id target_id;
-    bool need_notify = false;
-
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-        auto now = std::chrono::steady_clock::now();
-
-        if (workers_.size() > min_threads_ &&
-            tasks_.empty() &&
-            idle_count_ >= workers_.size() - 1 &&
-            (now - last_scale_time_) >= min_stable_time_) {
-
-            auto it = std::find_if(workers_.begin(), workers_.end(),
-                [this](const std::thread& t) {
-                    return t.get_id() != std::this_thread::get_id();
+                // 关键修复：简化等待条件，避免复杂逻辑
+                condition_.wait(lock, [this]() { 
+                    return shutdown_ || !tasks_.empty(); 
                 });
 
-            if (it != workers_.end()) {
-                target_id = it->get_id();
-                threads_to_retire_.push_back(target_id);
-                workers_.erase(it);
-                last_scale_time_ = now;
-                need_notify = true;
-                std::cout << "Marked thread " << target_id << " for retirement.\n";
+                if (shutdown_ && tasks_.empty()) {
+                    idle_count_--;
+                    should_exit = true;
+                } else if (!tasks_.empty()) {
+                    task = std::move(tasks_.front());
+                    tasks_.pop();
+                    idle_count_--;
+                }
+                
+                // 如果should_exit为true，直接退出循环
+                if (should_exit) {
+                    break;
+                }
             }
-        }
-    } // 锁在这里释放
 
-    if (need_notify) {
-        condition_.notify_all(); // 安全地在锁外通知
+            // 在锁外执行任务，避免阻塞其他线程
+            if (task) {
+                try {
+                    task();
+                } catch (const std::exception& e) {
+                    std::cerr << "Task execution error in thread " << my_id << ": " << e.what() << std::endl;
+                } catch (...) {
+                    std::cerr << "Unknown task execution error in thread " << my_id << std::endl;
+                }
+            }
+
+            
+            check_and_scale_down_simple();
+        }
     }
-}
 
-    bool should_retire(std::thread::id id){
-        auto it = std::find(threads_to_retire_.begin(), threads_to_retire_.end(), id);
-        if(it != threads_to_retire_.end()){
-            return true;
-        }
-        return false;
+    void check_and_scale_down_simple() { //动态缩容
+        
     }
 };
