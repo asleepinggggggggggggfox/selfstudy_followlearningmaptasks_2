@@ -1,170 +1,171 @@
+// ThreadPool_Fixed.hpp
+#pragma once
+
 #include <vector>
 #include <queue>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include <functional>
 #include <future>
+#include <functional>
 #include <atomic>
-#include <string>
-#include <cassert>
-
-
-enum class ThreadStatus{
-    idle,
-    busy,
-    stopped
-};
-
-struct ThreadText {
-    std::thread thread;
-    std::atomic<ThreadStatus> status{ThreadStatus::idle};
-    std::thread::id threadId{};
-    std::atomic<bool> stop{false};
-
-    ThreadText() = default;
-    ThreadText(const ThreadText&) = delete;
-    ThreadText& operator=(const ThreadText&) = delete;
-    
-    // ÒÆ¶¯¹¹Ôìº¯Êı
-    ThreadText(ThreadText&& other) noexcept 
-        : thread(std::move(other.thread))
-        , status(other.status.load())
-        , threadId(other.threadId)
-        , stop(other.stop.load()) {
-    }
-    
-    // ÒÆ¶¯¸³ÖµÔËËã·û
-    ThreadText& operator=(ThreadText&& other) noexcept {
-        if (this != &other) {
-            thread = std::move(other.thread);
-            status.store(other.status.load());
-            threadId = other.threadId;
-            stop.store(other.stop.load());
-        }
-        return *this;
-    }
-};
+#include <memory>
+#include <iostream>
+#include <chrono>
+#include <algorithm>
 
 class ThreadPool {
 public:
-    ThreadPool(const ThreadPool&) = delete;
-    ThreadPool& operator=(const ThreadPool&) = delete;
-    ThreadPool(ThreadPool&&) = delete;
-    ThreadPool& operator=(ThreadPool&&) = delete;
-
-    ThreadPool(size_t numofthread) : stopall{false} {
-        if (numofthread == 0) {
-            throw std::invalid_argument("nums of threads must >0");
-        }
-        
-        threadTexts.reserve(numofthread);
-        for(size_t i = 0; i < numofthread; ++i) {
-            threadTexts.emplace_back();
-            threadTexts[i].thread = std::thread(&ThreadPool::workerThread, this);
-            threadTexts[i].threadId = threadTexts[i].thread.get_id();
-        }
-    }
-    void workerThread(){
-        std::thread::id this_id = std::this_thread::get_id();
-        int index = -1;
-        for(size_t i = 0; i < threadTexts.size(); ++i){
-            if(threadTexts[i].threadId == this_id){
-                index = i;
-                break;
-            }
-        }
-        if(index == -1) {
-        std::cerr << "´íÎó£º¹¤×÷Ïß³ÌÎ´ÔÚÏß³ÌÁĞ±íÖĞÕÒµ½£¡" << std::endl;
-        return; // °²È«ÍË³ö
-    }
-        while(true){
-        std::function<void()> task;
-        threadTexts[index].status.store(ThreadStatus::idle);
-        {
-        std::unique_lock<std::mutex> lock(queuemutex);
-        condition.wait(lock,[this]{
-            return stopall || !workqueue.empty();
+    explicit ThreadPool(size_t min_threads = std::thread::hardware_concurrency(),
+                       size_t max_threads = std::thread::hardware_concurrency() * 2)
+        : shutdown_(false), min_threads_(min_threads), max_threads_(max_threads) 
+    {
+        // å…ˆåˆ›å»ºæ‰€æœ‰çº¿ç¨‹ï¼Œä½†ä¸ç«‹å³å¯åŠ¨å·¥ä½œå¾ªç¯
+        for (size_t i = 0; i < min_threads_; ++i) {
+            workers_.emplace_back([this]() { 
+                // çŸ­æš‚çš„å»¶è¿Ÿï¼Œç¡®ä¿ä¸»çº¿ç¨‹å®Œæˆåˆå§‹åŒ–
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                worker_loop(); 
             });
-        if(stopall && workqueue.empty()){
-            threadTexts[index].status.store(ThreadStatus::stopped);
-            return;
-            }
-            if(!workqueue.empty()){
-            task = std::move(workqueue.front());  
-            workqueue.pop();                
-            }
-
         }
-        if(task){
-            threadTexts[index].status.store(ThreadStatus::busy);
-            task();
-        }   
-    }
+        std::cout << "ThreadPool initialized with " << min_threads_ << " threads, max: " << max_threads_ << std::endl;
+        
+        // ç­‰å¾…æ‰€æœ‰å·¥ä½œçº¿ç¨‹çœŸæ­£å¯åŠ¨
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     template<class F, class... Args>
-    auto enqueue(F&&f,Args&& ...args)->std::future<typename std::result_of<F(Args...)>::type>{ //ÉùÃ÷ºÍ¶¨ÒåÒª·ÅÔÚÒ»Æğ
+    auto submit(F&& f, Args&&... args) 
+        -> std::future<typename std::result_of<F(Args...)>::type> {
+        
         using return_type = typename std::result_of<F(Args...)>::type;
+        
         auto task = std::make_shared<std::packaged_task<return_type()>>(
             std::bind(std::forward<F>(f), std::forward<Args>(args)...)
         );
+        
         std::future<return_type> result = task->get_future();
-        {
-            std::unique_lock<std::mutex> lock(queuemutex);
 
-            if(stopall){
-                throw std::runtime_error("enqueue on stopped ThreadPool");
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            
+            if(shutdown_) {
+                throw std::runtime_error("submit called on stopped ThreadPool");
             }
-            workqueue.emplace([task](){(*task)();}); //´æÈëlamda±í´ïÊ½ ¹¤×÷Ïß³Ì½øĞĞµ÷ÓÃ
+
+            tasks_.emplace([task](){ (*task)(); });
+
+            // æ›´ä¿å®ˆçš„æ‰©å®¹ç­–ç•¥
+            if (tasks_.size() > 2 && get_idle_count_safe() == 0 && workers_.size() < max_threads_) {
+                workers_.emplace_back([this]() { 
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    worker_loop(); 
+                });
+                std::cout << "Dynamic expansion: Thread created. Total: " << workers_.size() << std::endl;
+            }
         }
-        condition.notify_one();
+
+        condition_.notify_one();
         return result;
     }
 
+    size_t get_thread_count() const {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        return workers_.size();
+    }
 
-    ~ThreadPool(){
+    size_t get_queue_size() const {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        return tasks_.size();
+    }
+
+    // å®‰å…¨çš„ç©ºé—²çº¿ç¨‹è®¡æ•°ï¼ˆæ— é”ç‰ˆæœ¬ï¼‰
+    size_t get_idle_count_safe() const {
+        return idle_count_.load();
+    }
+
+    void wait_all() {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        completion_condition_.wait(lock, [this]() {
+            return tasks_.empty() && (idle_count_ == workers_.size());
+        });
+    }
+
+    ~ThreadPool() {
         {
-            std::unique_lock<std::mutex> lock(queuemutex);
-            stopall = true;
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            shutdown_ = true;
         }
-        condition.notify_all();
-        for(ThreadText &workerText:threadTexts){
-            if(workerText.thread.joinable()){
-                workerText.thread.join();
+        condition_.notify_all();
+        completion_condition_.notify_all();
+        
+        for (auto &worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
             }
         }
+        std::cout << "ThreadPool destroyed successfully." << std::endl;
     }
-
-
-
-
-
-
-    size_t workqueuesize() const{
-    std::unique_lock<std::mutex> lock(queuemutex);
-    return workqueue.size();
-    }
-    size_t aliveThreadCount() const{
-        size_t count = 0;
-        for(const auto& threadText : threadTexts){
-            ThreadStatus status = threadText.status.load();
-            if(status != ThreadStatus::stopped){
-                count++;
-            }
-        }
-        return count;
-    }
-
-
-
-
 
 private:
-    std::vector<ThreadText> threadTexts;            //Ïß³ÌĞÅÏ¢
-    std::queue<std::function<void()>> workqueue;    //ÈÎÎñ¶ÓÁĞ
+    std::atomic<bool> shutdown_{false};
+    std::vector<std::thread> workers_;
+    std::queue<std::function<void()>> tasks_;
+    mutable std::mutex queue_mutex_;
+    std::condition_variable condition_;
+    std::condition_variable completion_condition_;
+    std::atomic<size_t> idle_count_{0};
+    size_t min_threads_;
+    size_t max_threads_;
 
-    mutable std::mutex queuemutex;                  //ÈÎÎñ¶ÓÁĞ»¥³âËø
-    std::condition_variable condition;              //Ìõ¼ş±äÁ¿
-    std::atomic<bool> stopall;              //Í£Ö¹±êÖ¾
+    void worker_loop() {
+        auto my_id = std::this_thread::get_id();
+        
+        while (true) {
+            std::function<void()> task;
+            bool should_exit = false;
+
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                idle_count_++;
+
+                // å…³é”®ä¿®å¤ï¼šç®€åŒ–ç­‰å¾…æ¡ä»¶ï¼Œé¿å…å¤æ‚é€»è¾‘
+                condition_.wait(lock, [this]() { 
+                    return shutdown_ || !tasks_.empty(); 
+                });
+
+                if (shutdown_ && tasks_.empty()) {
+                    idle_count_--;
+                    should_exit = true;
+                } else if (!tasks_.empty()) {
+                    task = std::move(tasks_.front());
+                    tasks_.pop();
+                    idle_count_--;
+                }
+                
+                // å¦‚æœshould_exitä¸ºtrueï¼Œç›´æ¥é€€å‡ºå¾ªç¯
+                if (should_exit) {
+                    break;
+                }
+            }
+
+            // åœ¨é”å¤–æ‰§è¡Œä»»åŠ¡ï¼Œé¿å…é˜»å¡å…¶ä»–çº¿ç¨‹
+            if (task) {
+                try {
+                    task();
+                } catch (const std::exception& e) {
+                    std::cerr << "Task execution error in thread " << my_id << ": " << e.what() << std::endl;
+                } catch (...) {
+                    std::cerr << "Unknown task execution error in thread " << my_id << std::endl;
+                }
+            }
+
+            
+            check_and_scale_down_simple();
+        }
+    }
+
+    void check_and_scale_down_simple() { //åŠ¨æ€ç¼©å®¹
+        
+    }
 };
